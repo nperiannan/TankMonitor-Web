@@ -66,6 +66,8 @@ type OtaInfo struct {
 	Filename    string `json:"filename"`
 	Size        int64  `json:"size"`
 	UploadedAt  string `json:"uploaded_at"`
+	Phase       string `json:"phase"`       // idle | triggered | downloading | success | failed
+	PrevFw      string `json:"prev_fw,omitempty"`
 }
 
 var (
@@ -250,6 +252,17 @@ func onStatusMsg(_ mqtt.Client, msg mqtt.Message) {
 	stateMu.Lock()
 	lastStatus = raw
 	stateMu.Unlock()
+
+	// Detect OTA success: fw version changed after trigger
+	otaMu.Lock()
+	if otaInfo.Phase == "triggered" || otaInfo.Phase == "downloading" {
+		var st Status
+		if err := json.Unmarshal(raw, &st); err == nil && st.FW != "" && st.FW != otaInfo.PrevFw {
+			otaInfo.Phase = "success"
+			log.Printf("[OTA] Success — fw changed %s → %s", otaInfo.PrevFw, st.FW)
+		}
+	}
+	otaMu.Unlock()
 
 	select {
 	case broadcast <- raw:
@@ -473,6 +486,7 @@ func handleOtaUpload(w http.ResponseWriter, r *http.Request) {
 		Filename:    filepath.Base(header.Filename),
 		Size:        written,
 		UploadedAt:  time.Now().UTC().Format(time.RFC3339),
+		Phase:       "idle",
 	}
 	otaMu.Unlock()
 
@@ -519,6 +533,29 @@ func handleOtaTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[OTA] Triggered flash — URL: %s", firmwareURL)
+
+	// Record phase transition and start failure-timeout goroutine
+	stateMu.RLock()
+	var curSt Status
+	_ = json.Unmarshal(lastStatus, &curSt)
+	stateMu.RUnlock()
+
+	otaMu.Lock()
+	otaInfo.Phase  = "triggered"
+	otaInfo.PrevFw = curSt.FW
+	otaMu.Unlock()
+
+	// Auto-fail if no version change seen within 120 s
+	go func() {
+		time.Sleep(120 * time.Second)
+		otaMu.Lock()
+		if otaInfo.Phase == "triggered" || otaInfo.Phase == "downloading" {
+			otaInfo.Phase = "failed"
+			log.Printf("[OTA] Timeout — marking as failed")
+		}
+		otaMu.Unlock()
+	}()
+
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
 }
@@ -553,6 +590,12 @@ func handleOtaServeFirmware(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no firmware", http.StatusNotFound)
 		return
 	}
+	log.Printf("[OTA] Serving firmware to %s", r.RemoteAddr)
+	otaMu.Lock()
+	if otaInfo.Phase == "triggered" {
+		otaInfo.Phase = "downloading"
+	}
+	otaMu.Unlock()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	http.ServeFile(w, r, otaFile)

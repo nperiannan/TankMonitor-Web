@@ -275,6 +275,7 @@ export default function App() {
   const [uploadPct,    setUploadPct]    = useState<number | null>(null)
   const [otaError,     setOtaError]     = useState<string | null>(null)
   const [otaBusy,      setOtaBusy]      = useState(false)
+  const otaPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // Device logs state
   const [deviceLogs,   setDeviceLogs]   = useState<string[]>([])
   const [logsAt,       setLogsAt]       = useState<string | null>(null)
@@ -420,9 +421,26 @@ export default function App() {
     setOtaBusy(true)
     try {
       await triggerOta(token)
+      // Poll for phase completion — keep otaBusy true until done
+      if (otaPollRef.current) clearInterval(otaPollRef.current)
+      otaPollRef.current = setInterval(async () => {
+        try {
+          const st = await fetchOtaStatus(token!)
+          setOtaStatus(st)
+          const done = !st.phase || st.phase === 'idle' || st.phase === 'success' || st.phase === 'failed'
+          if (done) {
+            clearInterval(otaPollRef.current!)
+            otaPollRef.current = null
+            setOtaBusy(false)
+          }
+        } catch {
+          clearInterval(otaPollRef.current!)
+          otaPollRef.current = null
+          setOtaBusy(false)
+        }
+      }, 3000)
     } catch (e: unknown) {
       setOtaError(e instanceof Error ? e.message : 'Trigger failed')
-    } finally {
       setOtaBusy(false)
     }
   }
@@ -615,9 +633,9 @@ export default function App() {
               value={s?.lcd_bl_mode ?? 0}
               onChange={(v: number) => ctrl({ cmd: 'set_lcd_mode', mode: ['auto', 'always_on', 'always_off'][v] } as unknown as ControlCmd)}
               options={[
-                { value: 0, label: 'Auto (Off 7AM–5:30PM)' },
-                { value: 1, label: 'Always On' },
-                { value: 2, label: 'Always Off' },
+                { value: 0, label: 'Auto' },
+                { value: 1, label: 'On' },
+                { value: 2, label: 'Off' },
               ]}
             />
           </div>
@@ -659,6 +677,21 @@ export default function App() {
           {otaError && (
             <Alert message={otaError} type="error" showIcon closable style={{ marginBottom: 10 }}
               onClose={() => setOtaError(null)} />
+          )}
+
+          {/* OTA phase progress */}
+          {otaStatus?.phase && otaStatus.phase !== 'idle' && (
+            <Alert
+              style={{ marginBottom: 10 }}
+              showIcon
+              type={otaStatus.phase === 'success' ? 'success' : otaStatus.phase === 'failed' ? 'error' : 'info'}
+              message={
+                otaStatus.phase === 'triggered'   ? '⚡ Flash triggered — ESP32 is starting download…' :
+                otaStatus.phase === 'downloading' ? '⬇️ ESP32 is downloading firmware…' :
+                otaStatus.phase === 'success'     ? `✅ Update successful! Device rebooted with fw ${otaStatus.prev_fw ? `${otaStatus.prev_fw} → ` : ''}${s?.fw ?? 'new version'}` :
+                otaStatus.phase === 'failed'      ? '❌ Update failed — ESP32 did not apply the firmware. Try again or use serial flash.' : ''
+              }
+            />
           )}
 
           {/* Current staged firmware info */}
@@ -708,7 +741,11 @@ export default function App() {
                 disabled={!otaStatus?.has_firmware || otaBusy}
                 loading={otaBusy && uploadPct === null}
               >
-                Flash to ESP32
+                {otaBusy && uploadPct === null
+                  ? (otaStatus?.phase === 'triggered'   ? 'Triggering…'
+                  :  otaStatus?.phase === 'downloading' ? 'Downloading…'
+                  :  'Flashing…')
+                  : 'Flash to ESP32'}
               </Button>
             </Popconfirm>
 
