@@ -340,8 +340,8 @@ export default function App() {
 
   const s = status
 
-  // Enabled schedules only; next upcoming per motor for row highlight
-  const activeSchedules = (s?.schedules ?? []).filter(sch => sch.on)
+  // All schedules shown; next upcoming per motor for row highlight
+  const activeSchedules = s?.schedules ?? []
   const nextOH = s?.time ? getNextSchedIdx(activeSchedules, 'OH', s.time) : null
   const nextUG = s?.time ? getNextSchedIdx(activeSchedules, 'UG', s.time) : null
 
